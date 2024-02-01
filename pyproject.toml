@@ -2,6 +2,8 @@
 requires = [
     "setuptools>=42",
     "wheel",
-    "torch",
+    # NOTE: Disable. Users should install the desired version beforehand
+    # themselves so that the library is available in the environment.
+    # "torch",
 ]
 build-backend = "setuptools.build_meta"
