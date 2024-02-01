@@ -7,7 +7,7 @@
 #include "sampling/sampling_cuda_kernel.h"
 #include "interpolation/interpolation_cuda_kernel.h"
 #include "knnquery/knnquery_cuda_kernel.h"
-
+#include "knnquery_heap/knnquery_heap_cuda_kernel.h"
 #include "labelstat/labelstat_cuda_kernel.h"
 #include "featuredistribute/featuredistribute_cuda_kernel.h"
 
@@ -16,6 +16,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("ballquery_cuda", &ballquery_cuda_fast, "ballquery_cuda_fast");   // name in python, cpp function address, docs
 
     m.def("knnquery_cuda", &knnquery_cuda, "knnquery_cuda");
+    m.def("knnquery_heap_cuda", &knnquery_heap_cuda, "knnquery_heap_cuda");
 
     m.def("grouping_forward_cuda", &grouping_forward_cuda_fast, "grouping_forward_cuda_fast");
     m.def("grouping_backward_cuda", &grouping_backward_cuda, "grouping_backward_cuda");

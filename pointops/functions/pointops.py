@@ -1,10 +1,38 @@
 from typing import Tuple
-
+import numpy as np
 import torch
 from torch.autograd import Function
 import torch.nn as nn
 
-import pointops_cuda
+try:
+    import pointops_cuda
+except ImportError:
+    import warnings
+    import os
+    from torch.utils.cpp_extension import load
+    warnings.warn("Unable to load pointops_cuda cpp extension.")
+    pointops_cuda_src = os.path.join(os.path.dirname(__file__), "../src")
+    pointops_cuda = load('pointops_cuda', [
+        pointops_cuda_src + '/pointops_api.cpp',
+        pointops_cuda_src + '/ballquery/ballquery_cuda.cpp',
+        pointops_cuda_src + '/ballquery/ballquery_cuda_kernel.cu',
+        pointops_cuda_src + '/knnquery/knnquery_cuda.cpp',
+        pointops_cuda_src + '/knnquery/knnquery_cuda_kernel.cu',
+        pointops_cuda_src + '/knnquery_heap/knnquery_heap_cuda.cpp',
+        pointops_cuda_src + '/knnquery_heap/knnquery_heap_cuda_kernel.cu',
+        pointops_cuda_src + '/grouping/grouping_cuda.cpp',
+        pointops_cuda_src + '/grouping/grouping_cuda_kernel.cu',
+        pointops_cuda_src + '/grouping_int/grouping_int_cuda.cpp',
+        pointops_cuda_src + '/grouping_int/grouping_int_cuda_kernel.cu',
+        pointops_cuda_src + '/interpolation/interpolation_cuda.cpp',
+        pointops_cuda_src + '/interpolation/interpolation_cuda_kernel.cu',
+        pointops_cuda_src + '/sampling/sampling_cuda.cpp',
+        pointops_cuda_src + '/sampling/sampling_cuda_kernel.cu',
+        pointops_cuda_src + '/labelstat/labelstat_cuda.cpp',
+        pointops_cuda_src + '/labelstat/labelstat_cuda_kernel.cu',
+        pointops_cuda_src + '/featuredistribute/featuredistribute_cuda.cpp',
+        pointops_cuda_src + '/featuredistribute/featuredistribute_cuda_kernel.cu'
+    ], build_directory=pointops_cuda_src, verbose=False)
 
 
 class FurthestSampling(Function):
@@ -91,6 +119,7 @@ class Interpolation(Function):
                weight: (b, n, 3) weights
         output: (b, c, n) tensor of the interpolated features
         """
+        features = features.contiguous()
         assert features.is_contiguous()
         assert idx.is_contiguous()
         assert weight.is_contiguous()
@@ -416,6 +445,8 @@ class KNNQuery(Function):
         """
         if new_xyz is None:
             new_xyz = xyz
+        xyz = xyz.contiguous()
+        new_xyz = new_xyz.contiguous()
         assert xyz.is_contiguous()
         assert new_xyz.is_contiguous()
         b, m, _ = new_xyz.size()
@@ -430,6 +461,36 @@ class KNNQuery(Function):
         return None, None, None
 
 knnquery = KNNQuery.apply
+
+
+class KNNQuery_Heap(Function):
+    @staticmethod
+    def forward(ctx, nsample: int, xyz: torch.Tensor, new_xyz: torch.Tensor = None) -> Tuple[torch.Tensor]:
+        """
+        KNN Indexing
+        input: nsample: int32, Number of neighbor
+               xyz: (b, n, 3) coordinates of the features
+               new_xyz: (b, m, 3) centriods
+            output: idx: (b, m, nsample)
+                   ( dist2: (b, m, nsample) )
+        """
+        if new_xyz is None:
+            new_xyz = xyz
+        assert xyz.is_contiguous()
+        assert new_xyz.is_contiguous()
+        b, m, _ = new_xyz.size()
+        n = xyz.size(1)
+        idx = torch.cuda.IntTensor(b, m, nsample).zero_()
+        dist2 = torch.cuda.FloatTensor(b, m, nsample).zero_()
+        pointops_cuda.knnquery_heap_cuda(b, n, m, nsample, xyz, new_xyz, idx, dist2)
+        ctx.mark_non_differentiable(idx)
+        return idx
+
+    @staticmethod
+    def backward(ctx, a=None):
+        return None, None, None
+
+knnquery_heap = KNNQuery_Heap.apply
 
 
 class KNNQueryExclude(Function):
@@ -479,9 +540,62 @@ class QueryAndGroup(nn.Module):
         radius: float32, Radius of ball
         nsample: int32, Maximum number of features to gather in the ball
     """
-    def __init__(self, radius=None, nsample=32, use_xyz=True):
+    def __init__(self, radius=None, nsample=32, use_xyz=True, return_idx=False):
         super(QueryAndGroup, self).__init__()
         self.radius, self.nsample, self.use_xyz = radius, nsample, use_xyz
+        self.return_idx = return_idx
+
+    def forward(self, xyz: torch.Tensor, new_xyz: torch.Tensor = None, features: torch.Tensor = None, idx: torch.Tensor = None) -> torch.Tensor:
+        """
+        input: xyz: (b, n, 3) coordinates of the features
+               new_xyz: (b, m, 3) centriods
+               features: (b, c, n)
+               idx: idx of neighbors
+               # idxs: (b, n)
+        output: new_features: (b, c+3, m, nsample)
+              #  grouped_idxs: (b, m, nsample)
+        """
+        if new_xyz is None:
+            new_xyz = xyz
+        if idx is None:
+            if self.radius is not None:
+                idx = ballquery(self.radius, self.nsample, xyz, new_xyz)
+            else:
+                # idx = knnquery_naive(self.nsample, xyz, new_xyz)   # (b, m, nsample)
+                # idx = knnquery(self.nsample, xyz, new_xyz)  # (b, m, nsample)
+                idx = knnquery_heap(self.nsample, xyz, new_xyz)  # (b, m, nsample)
+        xyz_trans = xyz.transpose(1, 2).contiguous()
+        grouped_xyz = grouping(xyz_trans, idx)  # (b, 3, m, nsample)
+        # grouped_idxs = grouping(idxs.unsqueeze(1).float(), idx).squeeze(1).int()  # (b, m, nsample)
+        grouped_xyz_diff = grouped_xyz - new_xyz.transpose(1, 2).unsqueeze(-1)
+        if features is not None:
+            grouped_features = grouping(features, idx)
+            if self.use_xyz:
+                new_features = torch.cat([grouped_xyz_diff, grouped_features], dim=1)  # (b, 3+c, m, nsample)
+            else:
+                new_features = grouped_features
+        else:
+            assert self.use_xyz, "Cannot have not features and not use xyz as a feature!"
+            new_features = grouped_xyz_diff
+
+        if self.return_idx:
+            return new_features, grouped_xyz, idx.long()
+            # (b,c,m,k), (b,3,m,k), (b,m,k)
+        else:
+            return new_features, grouped_xyz
+
+
+class QueryAndGroupForKPConv(nn.Module):
+    """
+    Groups with a ball query of radius
+    parameters:
+        radius: float32, Radius of ball
+        nsample: int32, Maximum number of features to gather in the ball
+    """
+    def __init__(self, radius=None, nsample=32, use_xyz=True, return_group_idx=False):
+        super(QueryAndGroupForKPConv, self).__init__()
+        self.radius, self.nsample, self.use_xyz = radius, nsample, use_xyz
+        self.return_group_idx = return_group_idx
 
     def forward(self, xyz: torch.Tensor, new_xyz: torch.Tensor = None, features: torch.Tensor = None, idx: torch.Tensor = None) -> torch.Tensor:
         """
@@ -504,18 +618,19 @@ class QueryAndGroup(nn.Module):
         xyz_trans = xyz.transpose(1, 2).contiguous()
         grouped_xyz = grouping(xyz_trans, idx)  # (b, 3, m, nsample)
         # grouped_idxs = grouping(idxs.unsqueeze(1).float(), idx).squeeze(1).int()  # (b, m, nsample)
-
-        grouped_xyz -= new_xyz.transpose(1, 2).unsqueeze(-1)
+        grouped_xyz_diff = grouped_xyz - new_xyz.transpose(1, 2).unsqueeze(-1)
         if features is not None:
             grouped_features = grouping(features, idx)
             if self.use_xyz:
-                new_features = torch.cat([grouped_xyz, grouped_features], dim=1)  # (b, c+3, m, nsample)
+                new_features = torch.cat([grouped_xyz_diff, grouped_features], dim=1)  # (b, c+3, m, nsample)
             else:
                 new_features = grouped_features
         else:
             assert self.use_xyz, "Cannot have not features and not use xyz as a feature!"
-            new_features = grouped_xyz
-        return new_features
+            new_features = grouped_xyz_diff
+
+        # (b,c,m,k), (b,3,m,k)
+        return new_features, grouped_xyz, idx
 
 
 class GroupAll(nn.Module):
@@ -545,3 +660,16 @@ class GroupAll(nn.Module):
         return new_features
 
 
+def fnv_hash_vec(arr):
+    """
+    FNV64-1A
+    """
+    assert arr.ndim == 3
+    # Floor first for negative coordinates
+    arr = arr.copy()
+    arr = arr.astype(np.uint64, copy=False)
+    hashed_arr = np.uint64(14695981039346656037) * torch.ones((arr.size(0), arr.size(1)), dtype=np.uint64)
+    for j in range(arr.shape[1]):  # loop on each coord channel
+        hashed_arr *= np.uint64(1099511628211)
+        hashed_arr = torch.bitwise_xor(hashed_arr, arr[:, j])
+    return hashed_arr

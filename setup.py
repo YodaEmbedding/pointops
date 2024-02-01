@@ -16,6 +16,8 @@ setup(
             'pointops/src/ballquery/ballquery_cuda_kernel.cu',
             'pointops/src/knnquery/knnquery_cuda.cpp',
             'pointops/src/knnquery/knnquery_cuda_kernel.cu',
+            'pointops/src/knnquery_heap/knnquery_heap_cuda.cpp',
+            'pointops/src/knnquery_heap/knnquery_heap_cuda_kernel.cu',
             'pointops/src/grouping/grouping_cuda.cpp',
             'pointops/src/grouping/grouping_cuda_kernel.cu',
             'pointops/src/grouping_int/grouping_int_cuda.cpp',
