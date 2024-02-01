@@ -33,7 +33,7 @@ setup(
             'pointops/src/featuredistribute/featuredistribute_cuda.cpp',
             'pointops/src/featuredistribute/featuredistribute_cuda_kernel.cu'
         ],
-                      extra_compile_args={'cxx': ['-g'],
-                                          'nvcc': ['-O2']})
+                      extra_compile_args={'cxx': ['-g', '-std=c++17'],
+                                          'nvcc': ['-O2', '-std=c++17']})
     ],
     cmdclass={'build_ext': BuildExtension})
