@@ -4,7 +4,7 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 setup(
     name="pointops-yoda",
-    version="0.0.0.post1",
+    version="0.0.0.post2",
     packages=find_packages(),
     install_requires=[
         "numpy",
